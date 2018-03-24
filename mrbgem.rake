@@ -31,12 +31,15 @@ MRuby::Gem::Specification.new 'mruby-tinycc' do |s|
     end
   end
 
-  file tinycc_lib => header do
+  file tinycc_lib => [header, __FILE__] do
     Dir.chdir tinycc_dir do
-      e = {}
+      e = {
+        "CC" => s.build.cc.command, "CFLAGS" => s.build.cc.flags.flatten.join(' '),
+        "LD" => s.build.linker.command, "LDFLAGS" => s.build.linker.flags.flatten.join(' '),
+      }
 
       run_command e, './configure'
-      run_command e, 'make XAR=""'
+      run_command e, 'make clean all'
     end
 
     FileUtils.mkdir_p tinycc_objs_dir
@@ -45,6 +48,8 @@ MRuby::Gem::Specification.new 'mruby-tinycc' do |s|
   end
 
   file libmruby_a => Dir.glob("#{tinycc_objs_dir}/*.o") if File.exists? tinycc_lib
+
+  s.linker.libraries << 'dl'
 
   file "#{dir}/src/mrb_tinycc.c" => tinycc_lib
   s.cc.include_paths << tinycc_dir

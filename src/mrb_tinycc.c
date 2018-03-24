@@ -2,15 +2,32 @@
 #include <mruby/array.h>
 #include <mruby/class.h>
 #include <mruby/data.h>
+#include <mruby/error.h>
 #include <mruby/string.h>
 #include <mruby/variable.h>
 
+// #pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wall"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#pragma GCC diagnostic ignored "-Wunused-function"
 #include <libtcc.h>
+#include <tcc.h>
+// #pragma GCC diagnostic pop
+
+static void
+raise_tcc_error(mrb_state *M, mrb_value state, const char *msg, mrb_value file, mrb_value program)
+{
+  mrb_value const exc = mrb_exc_new_str(M, mrb_class_get(M, "TCCError"), mrb_str_new_cstr(M, msg));
+  mrb_iv_set(M, exc, mrb_intern_lit(M, "@state"), state);
+  mrb_iv_set(M, exc, mrb_intern_lit(M, "@file"), file);
+  mrb_iv_set(M, exc, mrb_intern_lit(M, "@program"), program);
+  mrb_exc_raise(M, exc);
+}
 
 typedef struct mrb_tcc_state {
   mrb_state *M;
   TCCState *T;
-  mrb_value errors;
+  mrb_value errors, error_callback;
 } mrb_tcc_state;
 
 static void
@@ -34,7 +51,12 @@ get_tcc_state(mrb_state *M, mrb_value v)
 static void
 mrb_tcc_error_func(void *ptr, char const *str) {
   mrb_tcc_state *s = (mrb_tcc_state*)ptr;
-  mrb_ary_push(s->M, s->errors, mrb_str_new_cstr(s->M, str));
+  mrb_value str_val = mrb_str_new_cstr(s->M, str);
+  mrb_ary_push(s->M, s->errors, str_val);
+
+  if (!mrb_nil_p(s->error_callback)) {
+    mrb_yield(s->M, s->error_callback, str_val);
+  }
 }
 
 static mrb_value
@@ -44,6 +66,7 @@ mrb_tcc_init(mrb_state *M, mrb_value self)
   p->T = tcc_new();
   p->M = M;
   p->errors = mrb_ary_new(M);
+  p->error_callback = mrb_nil_value();
   mrb_iv_set(M, self, mrb_intern_lit(M, "errors"), p->errors);
   mrb_data_init(self, p, &mrb_tcc_state_type);
   tcc_set_error_func(p->T, p, mrb_tcc_error_func);
@@ -64,7 +87,7 @@ mrb_tcc_set_options(mrb_state *M, mrb_value self)
 {
   char *str;
   mrb_get_args(M, "z", &str);
-  return mrb_fixnum_value(tcc_set_options(get_tcc_state(M, self), str));
+  return tcc_set_options(get_tcc_state(M, self), str), self;
 }
 
 static mrb_value
@@ -110,13 +133,9 @@ mrb_tcc_add_file(mrb_state *M, mrb_value self)
   char *f;
   mrb_get_args(M, "z", &f);
   if (tcc_add_file(get_tcc_state(M, self), f) == -1) {
-    char const str[] = "add file error";
-    mrb_value const exc = mrb_exc_new(M, mrb_class_get(M, "TCCError"), str, sizeof(str) - 1);
-    mrb_iv_set(M, exc, mrb_intern_lit(M, "@state"), self);
     mrb_value file_val;
     mrb_get_args(M, "S", &file_val);
-    mrb_iv_set(M, exc, mrb_intern_lit(M, "@file"), file_val);
-    mrb_exc_raise(M, exc);
+    raise_tcc_error(M, self, "add file error", file_val, mrb_nil_value());
   }
   return self;
 }
@@ -127,13 +146,9 @@ mrb_tcc_compile_string(mrb_state *M, mrb_value self)
   char *prog;
   mrb_get_args(M, "z", &prog);
   if (tcc_compile_string(get_tcc_state(M, self), prog) == -1) {
-    char const str[] = "add file error";
-    mrb_value const exc = mrb_exc_new(M, mrb_class_get(M, "TCCError"), str, sizeof(str) - 1);
-    mrb_iv_set(M, exc, mrb_intern_lit(M, "@state"), self);
     mrb_value prog_val;
     mrb_get_args(M, "S", &prog_val);
-    mrb_iv_set(M, exc, mrb_intern_lit(M, "@program"), prog_val);
-    mrb_exc_raise(M, exc);
+    raise_tcc_error(M, self, "compile error", mrb_nil_value(), prog_val);
   }
   return self;
 }
@@ -142,8 +157,8 @@ static mrb_value
 mrb_tcc_set_output_type(mrb_state *M, mrb_value self)
 {
   mrb_value out;
-  mrb_get_args(M, "o", &out);
   int t = 0;
+  mrb_get_args(M, "o", &out);
   if (mrb_fixnum_p(out)) {
     t = mrb_fixnum(out);
   } else if (mrb_symbol_p(out)) {
@@ -177,10 +192,7 @@ mrb_tcc_add_library(mrb_state *M, mrb_value self)
   char *lib;
   mrb_get_args(M, "z", &lib);
   if (tcc_add_library(get_tcc_state(M, self), lib) == -1) {
-    char const str[] = "add library error";
-    mrb_value const exc = mrb_exc_new(M, mrb_class_get(M, "TCCError"), str, sizeof(str) - 1);
-    mrb_iv_set(M, exc, mrb_intern_lit(M, "@state"), self);
-    mrb_exc_raise(M, exc);
+    raise_tcc_error(M, self, "add library error", mrb_nil_value(), mrb_nil_value());
   }
   return self;
 }
@@ -204,10 +216,7 @@ mrb_tcc_output_file(mrb_state *M, mrb_value self)
   char *out;
   mrb_get_args(M, "z", &out);
   if (tcc_output_file(get_tcc_state(M, self), out) == -1) {
-    char const str[] = "output file error";
-    mrb_value const exc = mrb_exc_new(M, mrb_class_get(M, "TCCError"), str, sizeof(str) - 1);
-    mrb_iv_set(M, exc, mrb_intern_lit(M, "@state"), self);
-    mrb_exc_raise(M, exc);
+    raise_tcc_error(M, self, "output file error", mrb_nil_value(), mrb_nil_value());
   }
   return self;
 }
@@ -217,17 +226,18 @@ mrb_tcc_run(mrb_state *M, mrb_value self)
 {
   mrb_value *args;
   mrb_int args_len;
+  char *argv[256];
+  int res;
   mrb_get_args(M, "*", &args, &args_len);
-  char *argv[args_len];
+  if (args_len > 256) {
+    mrb_raisef(M, mrb_class_get(M, "ArgumentError"), "too many arguments: %S", mrb_fixnum_value(args_len));
+  }
   for (mrb_int i = 0; i < args_len; ++i) {
     argv[i] = mrb_str_to_cstr(M, args[i]);
   }
-  int res = tcc_run(get_tcc_state(M, self), args_len, argv);
+  res = tcc_run(get_tcc_state(M, self), args_len, argv);
   if (res == -1) {
-    char const str[] = "main function running error";
-    mrb_value const exc = mrb_exc_new(M, mrb_class_get(M, "TCCError"), str, sizeof(str) - 1);
-    mrb_iv_set(M, exc, mrb_intern_lit(M, "@state"), self);
-    mrb_exc_raise(M, exc);
+    raise_tcc_error(M, self, "main function running error", mrb_nil_value(), mrb_nil_value());
   }
   return mrb_fixnum_value(res);
 }
@@ -236,8 +246,8 @@ static mrb_value
 mrb_tcc_relocate(mrb_state *M, mrb_value self)
 {
   mrb_value ptr;
-  mrb_get_args(M, "o", &ptr);
   int res;
+  mrb_get_args(M, "o", &ptr);
   if (mrb_nil_p(ptr)) {
     res = tcc_relocate(get_tcc_state(M, self), NULL);
   } else if (mrb_cptr_p(ptr)) {
@@ -248,10 +258,7 @@ mrb_tcc_relocate(mrb_state *M, mrb_value self)
 
   if (res != -1) { return mrb_fixnum_value(res); }
   else {
-    char const str[] = "relocate error";
-    mrb_value const exc = mrb_exc_new(M, mrb_class_get(M, "TCCError"), str, sizeof(str) - 1);
-    mrb_iv_set(M, exc, mrb_intern_lit(M, "@state"), self);
-    mrb_exc_raise(M, exc);
+    raise_tcc_error(M, self, "relocate error", mrb_nil_value(), mrb_nil_value());
   }
   return self;
 }
@@ -260,8 +267,9 @@ static mrb_value
 mrb_tcc_symbol(mrb_state *M, mrb_value self)
 {
   mrb_sym sym;
+  void *ret;
   mrb_get_args(M, "n", &sym);
-  void* ret = tcc_get_symbol(get_tcc_state(M, self), mrb_sym2name(M, sym));
+  ret = tcc_get_symbol(get_tcc_state(M, self), mrb_sym2name(M, sym));
   return ret? mrb_cptr_value(M, ret) : mrb_nil_value();
 }
 
@@ -269,6 +277,72 @@ static mrb_value
 mrb_tcc_errors(mrb_state *M, mrb_value self)
 {
   return mrb_iv_get(M, self, mrb_intern_lit(M, "errors"));
+}
+
+static mrb_value
+mrb_tcc_error_callback(mrb_state *M, mrb_value self)
+{
+  mrb_value b;
+  mrb_get_args(M, "&", &b);
+  mrb_iv_set(M, self, mrb_intern_lit(M, "error_callback"), b);
+  ((mrb_tcc_state*)DATA_PTR(self))->error_callback = b;
+  return self;
+}
+
+#define def_bool_opt(name)                              \
+  static mrb_value                                      \
+  mrb_tcc_set_ ## name (mrb_state *M, mrb_value self) { \
+    mrb_bool b;                                         \
+    mrb_get_args(M, "b", &b);                           \
+    get_tcc_state(M, self)->name = b;                   \
+    return mrb_bool_value(b);                           \
+  }                                                     \
+
+def_bool_opt(verbose)
+def_bool_opt(nostdinc)
+def_bool_opt(nostdlib)
+def_bool_opt(nocommon)
+def_bool_opt(static_link)
+def_bool_opt(rdynamic)
+def_bool_opt(symbolic)
+def_bool_opt(alacarte_link)
+
+def_bool_opt(char_is_unsigned)
+def_bool_opt(leading_underscore)
+def_bool_opt(ms_extensions)
+def_bool_opt(dollars_in_identifiers)
+def_bool_opt(ms_bitfields)
+
+def_bool_opt(warn_write_strings)
+def_bool_opt(warn_unsupported)
+def_bool_opt(warn_error)
+def_bool_opt(warn_none)
+def_bool_opt(warn_implicit_function_declaration)
+def_bool_opt(warn_gcc_compat)
+
+#undef def_bool_opt
+
+static mrb_value
+mrb_tcc_catch_error(mrb_state *M, mrb_value self)
+{
+  mrb_value b, ret;
+  TCCState *st = get_tcc_state(M, self);
+  mrb_get_args(M, "&", &b);
+
+  if (setjmp(st->error_jmp_buf) == 0) {
+    st->error_set_jmp_enabled = 1;
+
+    ret = mrb_yield_argv(M, b, 0, NULL);
+  } else {
+    mrb_value errors = mrb_iv_get(M, self, mrb_intern_lit(M, "errors"));
+    st->error_set_jmp_enabled = 0;
+    mrb_assert(st->nb_errors > 0);
+    ret = RARRAY_PTR(errors)[RARRAY_LEN(errors) - 1];
+    raise_tcc_error(M, self, mrb_str_to_cstr(M, ret), mrb_nil_value(), mrb_nil_value());
+  }
+  st->error_set_jmp_enabled = 0;
+
+  return ret;
 }
 
 void
@@ -285,7 +359,7 @@ mrb_mruby_tinycc_gem_init(mrb_state *M)
   def_const(OUTPUT_DLL);
   def_const(OUTPUT_OBJ);
   // internal:
-  // def_const(OUTPUT_PREPROCESS);
+  def_const(OUTPUT_PREPROCESS);
 #undef def_const
 
   mrb_define_const(M, cls, "RELOCATE_AUTO", mrb_cptr_value(M, TCC_RELOCATE_AUTO));
@@ -295,6 +369,32 @@ mrb_mruby_tinycc_gem_init(mrb_state *M)
 
   def_meth("lib_path=", set_lib_path, MRB_ARGS_REQ(1));
   def_meth("options=", set_options, MRB_ARGS_REQ(1));
+
+#define def_bool_opt(name) def_meth(#name "=", set_ ## name, MRB_ARGS_REQ(1))
+
+  def_bool_opt(verbose);
+  def_bool_opt(nostdinc);
+  def_bool_opt(nostdlib);
+  def_bool_opt(nocommon);
+  def_bool_opt(static_link);
+  def_bool_opt(rdynamic);
+  def_bool_opt(symbolic);
+  def_bool_opt(alacarte_link);
+
+  def_bool_opt(char_is_unsigned);
+  def_bool_opt(leading_underscore);
+  def_bool_opt(ms_extensions);
+  def_bool_opt(dollars_in_identifiers);
+  def_bool_opt(ms_bitfields);
+
+  def_bool_opt(warn_write_strings);
+  def_bool_opt(warn_unsupported);
+  def_bool_opt(warn_error);
+  def_bool_opt(warn_none);
+  def_bool_opt(warn_implicit_function_declaration);
+  def_bool_opt(warn_gcc_compat);
+
+#undef def_bool_opt
 
   def_meth("add_include_path", add_include_path, MRB_ARGS_REQ(1));
   def_meth("add_sysinclude_path", add_sysinclude_path, MRB_ARGS_REQ(1));
@@ -306,6 +406,7 @@ mrb_mruby_tinycc_gem_init(mrb_state *M)
   def_meth("compile_string", compile_string, MRB_ARGS_REQ(1));
 
   def_meth("output_type=", set_output_type, MRB_ARGS_REQ(1));
+  def_meth("add_library", add_library, MRB_ARGS_REQ(1));
   def_meth("add_library_path", add_library_path, MRB_ARGS_REQ(1));
   def_meth("add_symbol", add_symbol, MRB_ARGS_REQ(1));
   def_meth("output_file", output_file, MRB_ARGS_REQ(1));
@@ -314,6 +415,9 @@ mrb_mruby_tinycc_gem_init(mrb_state *M)
   def_meth("symbol", symbol, MRB_ARGS_REQ(1));
 
   def_meth("errors", errors, MRB_ARGS_NONE());
+  def_meth("error_callback", error_callback, MRB_ARGS_BLOCK());
+
+  def_meth("catch_error", catch_error, MRB_ARGS_BLOCK());
 #undef def_meth
 }
 
